@@ -24,10 +24,18 @@ func (c *Client) CallCompletion(ctx context.Context, a *auth.RequestAuth, payloa
 	captureSession := c.capture.Start("deepseek_completion", dsprotocol.DeepSeekCompletionURL, a.AccountID, payload)
 	attempts := 0
 	for attempts < maxAttempts {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		resp, err := c.streamPost(ctx, clients.stream, dsprotocol.DeepSeekCompletionURL, headers, payload)
 		if err != nil {
+			if ctxErr := canceledContextErr(ctx, err); ctxErr != nil {
+				return nil, ctxErr
+			}
 			attempts++
-			time.Sleep(time.Second)
+			if !sleepWithContext(ctx, time.Second) {
+				return nil, ctx.Err()
+			}
 			continue
 		}
 		if resp.StatusCode == http.StatusOK {
@@ -42,7 +50,9 @@ func (c *Client) CallCompletion(ctx context.Context, a *auth.RequestAuth, payloa
 		}
 		_ = resp.Body.Close()
 		attempts++
-		time.Sleep(time.Second)
+		if !sleepWithContext(ctx, time.Second) {
+			return nil, ctx.Err()
+		}
 	}
 	return nil, errors.New("completion failed")
 }
@@ -63,6 +73,9 @@ func (c *Client) streamPost(ctx context.Context, doer trans.Doer, url string, he
 	}
 	resp, err := doer.Do(req)
 	if err != nil {
+		if ctxErr := canceledContextErr(ctx, err); ctxErr != nil {
+			return nil, ctxErr
+		}
 		config.Logger.Warn("[deepseek] fingerprint stream request failed, fallback to std transport", "url", url, "error", err)
 		req2, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(b))
 		if reqErr != nil {
@@ -71,7 +84,14 @@ func (c *Client) streamPost(ctx context.Context, doer trans.Doer, url string, he
 		for k, v := range headers {
 			req2.Header.Set(k, v)
 		}
-		return clients.fallbackS.Do(req2)
+		resp, err = clients.fallbackS.Do(req2)
+		if err != nil {
+			if ctxErr := canceledContextErr(ctx, err); ctxErr != nil {
+				return nil, ctxErr
+			}
+			return nil, err
+		}
+		return resp, nil
 	}
 	return resp, nil
 }

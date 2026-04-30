@@ -58,9 +58,15 @@ func (c *Client) CreateSession(ctx context.Context, a *auth.RequestAuth, maxAtte
 	attempts := 0
 	refreshed := false
 	for attempts < maxAttempts {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", ctxErr
+		}
 		headers := c.authHeaders(a.DeepSeekToken)
 		resp, status, err := c.postJSONWithStatus(ctx, clients.regular, clients.fallback, dsprotocol.DeepSeekCreateSessionURL, headers, map[string]any{"agent": "chat"})
 		if err != nil {
+			if ctxErr := canceledContextErr(ctx, err); ctxErr != nil {
+				return "", ctxErr
+			}
 			config.Logger.Warn("[create_session] request error", "error", err, "account", a.AccountID)
 			attempts++
 			continue
@@ -109,9 +115,15 @@ func (c *Client) GetPowForTarget(ctx context.Context, a *auth.RequestAuth, targe
 	lastFailureKind := FailureUnknown
 	lastFailureMessage := ""
 	for attempts < maxAttempts {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", ctxErr
+		}
 		headers := c.authHeaders(a.DeepSeekToken)
 		resp, status, err := c.postJSONWithStatus(ctx, clients.regular, clients.fallback, dsprotocol.DeepSeekCreatePowURL, headers, map[string]any{"target_path": targetPath})
 		if err != nil {
+			if ctxErr := canceledContextErr(ctx, err); ctxErr != nil {
+				return "", ctxErr
+			}
 			config.Logger.Warn("[get_pow] request error", "error", err, "account", a.AccountID, "target_path", targetPath)
 			lastFailureKind = FailureUnknown
 			lastFailureMessage = err.Error()
@@ -165,80 +177,6 @@ func (c *Client) authHeaders(token string) map[string]string {
 	}
 	headers["authorization"] = "Bearer " + token
 	return headers
-}
-
-func isTokenInvalid(status int, code int, bizCode int, msg string, bizMsg string) bool {
-	msg = strings.ToLower(strings.TrimSpace(msg) + " " + strings.TrimSpace(bizMsg))
-	if status == http.StatusUnauthorized || status == http.StatusForbidden {
-		return true
-	}
-	if code == 40001 || code == 40002 || code == 40003 || bizCode == 40001 || bizCode == 40002 || bizCode == 40003 {
-		return true
-	}
-	return strings.Contains(msg, "token") ||
-		strings.Contains(msg, "unauthorized") ||
-		strings.Contains(msg, "expired") ||
-		strings.Contains(msg, "not login") ||
-		strings.Contains(msg, "login required") ||
-		strings.Contains(msg, "invalid jwt")
-}
-
-func shouldAttemptRefresh(status int, code int, bizCode int, msg string, bizMsg string) bool {
-	if isTokenInvalid(status, code, bizCode, msg, bizMsg) {
-		return true
-	}
-	// Some DeepSeek failures come back as HTTP 200/code=0 but with non-zero biz_code.
-	// Only attempt refresh when these biz failures still look auth-related.
-	return status == http.StatusOK &&
-		code == 0 &&
-		bizCode != 0 &&
-		isAuthIndicativeBizFailure(msg, bizMsg)
-}
-
-func isAuthIndicativeBizFailure(msg string, bizMsg string) bool {
-	combined := strings.ToLower(strings.TrimSpace(msg) + " " + strings.TrimSpace(bizMsg))
-	authKeywords := []string{
-		"auth",
-		"authorization",
-		"credential",
-		"expired",
-		"invalid jwt",
-		"jwt",
-		"login",
-		"not login",
-		"session expired",
-		"token",
-		"unauthorized",
-		"登录",
-		"未登录",
-		"认证",
-		"凭证",
-		"会话过期",
-		"令牌",
-	}
-	for _, keyword := range authKeywords {
-		if strings.Contains(combined, keyword) {
-			return true
-		}
-	}
-	return false
-}
-
-func authFailureKind(useConfigToken bool) FailureKind {
-	if useConfigToken {
-		return FailureManagedUnauthorized
-	}
-	return FailureDirectUnauthorized
-}
-
-func failureMessage(msg string, bizMsg string, fallback string) string {
-	if trimmed := strings.TrimSpace(bizMsg); trimmed != "" {
-		return trimmed
-	}
-	if trimmed := strings.TrimSpace(msg); trimmed != "" {
-		return trimmed
-	}
-	return strings.TrimSpace(fallback)
 }
 
 // DeepSeek has returned create-session ids in both biz_data.id and

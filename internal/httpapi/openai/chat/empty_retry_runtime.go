@@ -54,17 +54,26 @@ func (h *Handler) handleNonStreamWithRetry(w http.ResponseWriter, ctx context.Co
 			h.finishChatNonStreamResult(w, result, attempts, usagePrompt, historySession)
 			return
 		}
+		if ctx.Err() != nil {
+			return
+		}
 
 		attempts++
 		config.Logger.Info("[openai_empty_retry] attempting synthetic retry", "surface", "chat.completions", "stream", false, "retry_attempt", attempts, "parent_message_id", result.responseMessageID)
 		retryPow, powErr := h.DS.GetPow(ctx, a, 3)
 		if powErr != nil {
+			if ctx.Err() != nil {
+				return
+			}
 			config.Logger.Warn("[openai_empty_retry] retry PoW fetch failed, falling back to original PoW", "surface", "chat.completions", "stream", false, "retry_attempt", attempts, "error", powErr)
 			retryPow = pow
 		}
 		retryPayload := clonePayloadForEmptyOutputRetry(payload, result.responseMessageID)
 		nextResp, err := h.DS.CallCompletion(ctx, a, retryPayload, retryPow, 3)
 		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
 			if historySession != nil {
 				historySession.error(http.StatusInternalServerError, "Failed to get completion.", "error", result.thinking, result.text)
 			}
@@ -158,6 +167,9 @@ func (h *Handler) handleStreamWithRetry(w http.ResponseWriter, r *http.Request, 
 			logChatStreamTerminal(streamRuntime, attempts)
 			return
 		}
+		if r.Context().Err() != nil {
+			return
+		}
 		if !retryable || !emptyOutputRetryEnabled() || attempts >= emptyOutputRetryMaxAttempts() {
 			streamRuntime.finalize("stop", false)
 			recordChatStreamHistory(streamRuntime, historySession)
@@ -168,11 +180,17 @@ func (h *Handler) handleStreamWithRetry(w http.ResponseWriter, r *http.Request, 
 		config.Logger.Info("[openai_empty_retry] attempting synthetic retry", "surface", "chat.completions", "stream", true, "retry_attempt", attempts, "parent_message_id", streamRuntime.responseMessageID)
 		retryPow, powErr := h.DS.GetPow(r.Context(), a, 3)
 		if powErr != nil {
+			if r.Context().Err() != nil {
+				return
+			}
 			config.Logger.Warn("[openai_empty_retry] retry PoW fetch failed, falling back to original PoW", "surface", "chat.completions", "stream", true, "retry_attempt", attempts, "error", powErr)
 			retryPow = pow
 		}
 		nextResp, err := h.DS.CallCompletion(r.Context(), a, clonePayloadForEmptyOutputRetry(payload, streamRuntime.responseMessageID), retryPow, 3)
 		if err != nil {
+			if r.Context().Err() != nil {
+				return
+			}
 			failChatStreamRetry(streamRuntime, historySession, http.StatusInternalServerError, "Failed to get completion.", "error")
 			config.Logger.Warn("[openai_empty_retry] retry request failed", "surface", "chat.completions", "stream", true, "retry_attempt", attempts, "error", err)
 			return
@@ -250,6 +268,9 @@ func (h *Handler) consumeChatStreamAttempt(r *http.Request, resp *http.Response,
 			}
 		},
 	})
+	if r.Context().Err() != nil {
+		return false, false
+	}
 	terminalWritten := streamRuntime.finalize(finalReason, allowDeferEmpty && finalReason != "content_filter")
 	if terminalWritten {
 		recordChatStreamHistory(streamRuntime, historySession)
@@ -274,16 +295,4 @@ func failChatStreamRetry(streamRuntime *chatStreamRuntime, historySession *chatH
 	if historySession != nil {
 		historySession.error(status, message, code, streamRuntime.thinking.String(), streamRuntime.text.String())
 	}
-}
-
-func logChatStreamTerminal(streamRuntime *chatStreamRuntime, attempts int) {
-	source := "first_attempt"
-	if attempts > 0 {
-		source = "synthetic_retry"
-	}
-	if streamRuntime.finalErrorMessage != "" {
-		config.Logger.Info("[openai_empty_retry] terminal empty output", "surface", "chat.completions", "stream", true, "retry_attempts", attempts, "success_source", "none", "error_code", streamRuntime.finalErrorCode)
-		return
-	}
-	config.Logger.Info("[openai_empty_retry] completed", "surface", "chat.completions", "stream", true, "retry_attempts", attempts, "success_source", source)
 }
